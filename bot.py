@@ -9,15 +9,16 @@ import os
 import sys
 import subprocess
 import logging
+import asyncio
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Bot Configuration
-BOT_TOKEN = ""  # Replace with your bot token
-API_ID = "20088778"        # Replace with your API ID
-API_HASH = "331f2d7782d1eb9ecf4c6ff0ac0ddcda"    # Replace with your API Hash
-ADMIN_IDS = [5827445104]            # Replace with your admin user IDs
+# Bot Configuration - YEH VALUES APNI ACTUAL VALUES SE REPLACE KARNA
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '8461756232:AAFfv224qFN0eh62osr1A5EXbkb0yZZw1aw')  # Render environment variable se
+API_ID = os.environ.get('API_ID', '20088778')  # Render environment variable se
+API_HASH = os.environ.get('API_HASH', '331f2d7782d1eb9ecf4c6ff0ac0ddcda')  # Render environment variable se
+ADMIN_IDS = [int(x) for x in os.environ.get('ADMIN_IDS', '5827445104').split(',')]  # Multiple IDs support
 
 # Enable logging
 logging.basicConfig(
@@ -43,12 +44,22 @@ class APKSigningBot:
         """Install Java if not available"""
         try:
             logger.info("Installing Java...")
-            subprocess.run(["pkg", "update", "-y"], check=True)
-            subprocess.run(["pkg", "install", "-y", "openjdk-17"], check=True)
+            # Render pe direct pkg install kaam nahi karega, isliye alternative approach
+            subprocess.run(["apt-get", "update"], check=True, capture_output=True)
+            subprocess.run(["apt-get", "install", "-y", "openjdk-17-jdk"], check=True, capture_output=True)
             return True
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to install Java: {e}")
-            return False
+            # Alternative: Download and setup manually
+            try:
+                subprocess.run([
+                    "wget", "https://download.java.net/java/GA/jdk17.0.1/2a2082e5a09d4267845be086888add4f/12/GPL/openjdk-17.0.1_linux-x64_bin.tar.gz"
+                ], check=True, capture_output=True)
+                subprocess.run(["tar", "-xzf", "openjdk-17.0.1_linux-x64_bin.tar.gz"], check=True, capture_output=True)
+                os.environ["PATH"] = f"{os.getcwd()}/jdk-17.0.1/bin:{os.environ['PATH']}"
+                return True
+            except:
+                return False
 
     def generate_keystore(self, user_data):
         """Generate JKS keystore and related files"""
@@ -220,6 +231,46 @@ Generated for: {alias_name}
         with open("README_APK_SIGNING.txt", "w") as f:
             f.write(readme_content)
 
+    def sign_apk_process(self, user_data):
+        """APK signing process"""
+        try:
+            apk_file = user_data.get('apk_file')
+            alias_name = user_data.get('alias_name', 'mykey')
+            store_pass = user_data.get('store_pass', 'android')
+            key_pass = user_data.get('key_pass', store_pass)
+            
+            if not os.path.exists(apk_file):
+                return False, f"APK file not found: {apk_file}"
+            
+            if not os.path.exists("android.jks"):
+                return False, "Keystore file not found. Please generate certificate first."
+            
+            # Sign the APK
+            cmd = [
+                "jarsigner", "-verbose",
+                "-keystore", "android.jks",
+                "-storepass", store_pass,
+                "-keypass", key_pass,
+                "-sigalg", "SHA256withRSA",
+                "-digestalg", "SHA-256",
+                apk_file,
+                alias_name
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                # Verify signature
+                verify_cmd = ["jarsigner", "-verify", "-verbose", apk_file]
+                verify_result = subprocess.run(verify_cmd, capture_output=True, text=True)
+                
+                return True, f"APK signed successfully!\n\nVerification Output:\n{verify_result.stdout}"
+            else:
+                return False, f"Signing failed: {result.stderr}"
+                
+        except Exception as e:
+            return False, f"Error during signing: {str(e)}"
+
 # Telegram Bot Handlers
 bot = APKSigningBot()
 
@@ -238,13 +289,14 @@ I can generate APK signing certificates compatible with MT Manager!
 
 *Available Commands:*
 /start - Show this welcome message
-/generate - Generate new APK signing certificate
+/generate - Generate new APK signing certificate  
+/sign - Sign an APK file with existing certificate
 /cancel - Cancel current operation
 
 *How to use:*
-1. Send /generate to start
-2. Follow the prompts to enter certificate details
-3. I'll create your keystore files!
+1. Send /generate to create new certificate
+2. Send /sign to sign existing APK
+3. Follow the prompts to enter details
 
 *Supported Formats:*
 • JKS (Java Keystore)
@@ -263,7 +315,7 @@ async def generate_certificate(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     # Initialize user data
-    bot.current_user_data[user_id] = {}
+    bot.current_user_data[user_id] = {'mode': 'generate'}
     
     await update.message.reply_text(
         "🔐 *Let's create your APK signing certificate!*\n\n"
@@ -274,8 +326,28 @@ async def generate_certificate(update: Update, context: ContextTypes.DEFAULT_TYP
     # Set next expected input
     context.user_data['expecting'] = 'alias_name'
 
+async def sign_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start the APK signing process."""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ You are not authorized to use this bot.")
+        return
+
+    # Initialize user data for signing
+    bot.current_user_data[user_id] = {'mode': 'sign'}
+    
+    await update.message.reply_text(
+        "📱 *APK Signing Process* 📱\n\n"
+        "Please send me the APK file you want to sign:",
+        parse_mode='Markdown'
+    )
+    
+    # Set next expected input
+    context.user_data['expecting'] = 'apk_file'
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle user messages during certificate generation."""
+    """Handle user messages during certificate generation or signing."""
     user_id = update.effective_user.id
     text = update.message.text
     
@@ -284,12 +356,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if user_id not in bot.current_user_data:
-        await update.message.reply_text("Please use /generate to start creating a certificate.")
+        await update.message.reply_text("Please use /generate or /sign to start.")
         return
 
-    expecting = context.user_data.get('expecting', 'alias_name')
+    expecting = context.user_data.get('expecting', '')
     user_data = bot.current_user_data[user_id]
+    mode = user_data.get('mode', 'generate')
 
+    if mode == 'generate':
+        await handle_generate_mode(update, context, user_data, expecting, text)
+    elif mode == 'sign':
+        await handle_sign_mode(update, context, user_data, expecting, text)
+
+async def handle_generate_mode(update, context, user_data, expecting, text):
+    """Handle generate certificate mode"""
     if expecting == 'alias_name':
         user_data['alias_name'] = text or 'mykey'
         context.user_data['expecting'] = 'org_name'
@@ -341,41 +421,91 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("🔧 keytool not found! Installing Java...")
             if not bot.install_java():
                 await update.message.reply_text("❌ Failed to install Java. Please install manually.")
-                del bot.current_user_data[user_id]
+                del bot.current_user_data[update.effective_user.id]
                 return
         
         # Generate keystore
         success, message = bot.generate_keystore(user_data)
         
         if success:
-            # Send success message and files
+            # Send success message
             await update.message.reply_text(
                 f"✅ *Certificate Generated Successfully!*\n\n"
                 f"📁 Files created in: `{bot.cert_dir}`\n"
                 f"🔑 Alias: `{user_data['alias_name']}`\n"
                 f"🏢 Organization: `{user_data['org_name']}`\n"
                 f"⏰ Validity: `{user_data['validity_years']} years`\n\n"
-                f"*Important:* Keep your keystore file safe!",
+                f"*Important:* Keep your keystore file safe!\n"
+                f"Now you can use `/sign` command to sign APK files.",
                 parse_mode='Markdown'
             )
-            
-            # Send files (in a real implementation, you'd send the actual files)
-            await update.message.reply_text(
-                "📦 *Generated Files:*\n"
-                "• `android.jks` - Main keystore file\n"
-                "• `android.p12` - PKCS12 format\n"
-                "• `certificate.cer` - Public certificate\n"
-                "• `sign_apk.sh` - Signing script\n"
-                "• `README_APK_SIGNING.txt` - Instructions",
-                parse_mode='Markdown'
-            )
-            
         else:
             await update.message.reply_text(f"❌ *Error generating certificate:*\n`{message}`", parse_mode='Markdown')
         
         # Clean up
-        del bot.current_user_data[user_id]
+        del bot.current_user_data[update.effective_user.id]
         context.user_data.clear()
+
+async def handle_sign_mode(update, context, user_data, expecting, text):
+    """Handle APK signing mode"""
+    if expecting == 'apk_file':
+        # For now, we'll assume user provides filename
+        user_data['apk_file'] = text
+        context.user_data['expecting'] = 'alias_name'
+        await update.message.reply_text("👤 Enter *Certificate Alias*:", parse_mode='Markdown')
+        
+    elif expecting == 'alias_name':
+        user_data['alias_name'] = text or 'mykey'
+        context.user_data['expecting'] = 'store_pass'
+        await update.message.reply_text("🔑 Enter *Keystore Password*:", parse_mode='Markdown')
+        
+    elif expecting == 'store_pass':
+        user_data['store_pass'] = text or 'android'
+        
+        # All data collected, sign APK
+        await update.message.reply_text("⏳ Signing your APK file...")
+        
+        # Sign APK
+        success, message = bot.sign_apk_process(user_data)
+        
+        if success:
+            await update.message.reply_text(
+                f"✅ *APK Signed Successfully!*\n\n"
+                f"📱 File: `{user_data['apk_file']}`\n"
+                f"🔑 Alias: `{user_data['alias_name']}`\n\n"
+                f"{message}",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(f"❌ *Signing failed:*\n`{message}`", parse_mode='Markdown')
+        
+        # Clean up
+        del bot.current_user_data[update.effective_user.id]
+        context.user_data.clear()
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle document (APK file) uploads"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        return
+    
+    if user_id in bot.current_user_data and bot.current_user_data[user_id].get('mode') == 'sign':
+        document = update.message.document
+        if document.file_name.endswith('.apk'):
+            # Download the file
+            file = await context.bot.get_file(document.file_id)
+            filename = f"uploaded_{document.file_name}"
+            await file.download_to_drive(filename)
+            
+            bot.current_user_data[user_id]['apk_file'] = filename
+            context.user_data['expecting'] = 'alias_name'
+            
+            await update.message.reply_text(
+                f"📥 APK file received: `{document.file_name}`\n\n"
+                "Now enter *Certificate Alias*:",
+                parse_mode='Markdown'
+            )
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel the current operation."""
@@ -388,30 +518,25 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Log errors and handle them gracefully."""
     logger.error(f"Update {update} caused error {context.error}")
-    await update.message.reply_text("❌ An error occurred. Please try again.")
+    if update and update.message:
+        await update.message.reply_text("❌ An error occurred. Please try again.")
 
 def main():
     """Start the bot."""
     # Check for required configuration
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("❌ Please set your BOT_TOKEN in the script!")
+    if not BOT_TOKEN or BOT_TOKEN.startswith('YOUR_') or BOT_TOKEN.startswith('7546987142'):
+        print("❌ Please set your actual BOT_TOKEN in environment variables!")
         sys.exit(1)
     
-    if API_ID == "YOUR_API_ID_HERE":
-        print("❌ Please set your API_ID in the script!")
-        sys.exit(1)
-    
-    if API_HASH == "YOUR_API_HASH_HERE":
-        print("❌ Please set your API_HASH in the script!")
-        sys.exit(1)
-
     # Create Application
     application = Application.builder().token(BOT_TOKEN).build()
 
     # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("generate", generate_certificate))
+    application.add_handler(CommandHandler("sign", sign_apk))
     application.add_handler(CommandHandler("cancel", cancel))
+    application.add_handler(MessageHandler(filters.Document.APK, handle_document))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_error_handler(error_handler)
 
