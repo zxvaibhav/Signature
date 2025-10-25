@@ -542,7 +542,13 @@ def main():
 
     # Start the Bot
     print("🤖 APK Signing Bot is running...")
-    application.run_polling()
+    
+    # Use proper async polling
+    try:
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except Exception as e:
+        logger.error(f"Bot failed to start: {e}")
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()
